@@ -2,34 +2,35 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
-import re
 
 st.set_page_config(page_title="Парсер Tinko", layout="wide")
 st.title("🧰 Парсер сайта tinko.ru")
 
-# Заранее заданные разделы (можно сделать автозагрузку)
-sections = {
-    "Средства и системы охранно-пожарной сигнализации": "https://www.tinko.ru/catalog/category/1/",
-    "Средства и системы охранного телевидения": "https://www.tinko.ru/catalog/category/265/",
-    "Средства и системы контроля и управления доступом": "https://www.tinko.ru/catalog/category/114/"
-}
 
-selected_sections = st.multiselect("Выберите разделы для парсинга:", options=list(sections.keys()))
+def get_sections() -> dict:
+    """Парсит категории с https://www.tinko.ru/catalog/"""
+    url = "https://www.tinko.ru/catalog/"
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+    soup = BeautifulSoup(r.text, "html.parser")
 
-@st.cache_data
+    sections = {}
+    links = soup.select("div.section-title a.section-title__link")
+    for link in links:
+        name = link.get_text(strip=True)
+        href = link["href"]
+        full_url = "https://www.tinko.ru" + href
+        sections[name] = full_url
+
+    return sections
+
+
 def get_max_pages(section_url: str) -> int:
+    """Определяет количество страниц в разделе"""
     debug = {}
-
     url = section_url + "?count=96&PAGEN_1=1"
     r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # Сохраняем сырой HTML для диагностики
-    debug["url"] = url
-    debug["status_code"] = r.status_code
-    debug["html_snippet"] = soup.prettify()[:2000]
-
-    # Ищем элементы пагинации
     page_links = soup.select("li.pagination__item > div.pagination__link")
     debug["pagination_blocks_found"] = len(page_links)
 
@@ -39,28 +40,28 @@ def get_max_pages(section_url: str) -> int:
         if text.isdigit():
             page_numbers.append(int(text))
 
-    debug["page_numbers"] = page_numbers
     max_page = max(page_numbers) if page_numbers else 1
     debug["max_page"] = max_page
 
-    # Показываем отладочную информацию
-    with st.expander(f"🛠️ Отладка: {section_url}", expanded=False):
+    with st.expander(f"🛠️ Отладка пагинации: {section_url}", expanded=False):
         for k, v in debug.items():
             st.write(f"**{k}**: {v}")
 
     return max_page
 
 
-
-
-
-@st.cache_data
 def parse_section(section_name: str, base_url: str) -> pd.DataFrame:
     data = []
     max_pages = get_max_pages(base_url)
-    st.info(f"🔍 {section_name}: {max_pages} страниц...")
+    st.info(f"🔍 {section_name}: найдено {max_pages} страниц")
+
+    status = st.empty()
+    progress_bar = st.progress(0, text=f"{section_name}: страница 1 из {max_pages}")
 
     for page in range(1, max_pages + 1):
+        status.text(f"🔄 Парсинг раздела: **{section_name}**, страница {page} из {max_pages}")
+        progress_bar.progress(page / max_pages, text=f"{section_name}: страница {page} из {max_pages}")
+
         url = f"{base_url}?count=96&PAGEN_1={page}"
         r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
         soup = BeautifulSoup(r.text, "html.parser")
@@ -86,7 +87,14 @@ def parse_section(section_name: str, base_url: str) -> pd.DataFrame:
             except Exception as e:
                 print(f"Ошибка: {e}")
 
+    status.text(f"✅ Готово: {section_name} полностью обработан")
+    progress_bar.empty()
     return pd.DataFrame(data)
+
+
+# Получаем разделы с сайта
+sections = get_sections()
+selected_sections = st.multiselect("Выберите разделы для парсинга:", options=list(sections.keys()))
 
 if st.button("🚀 Начать парсинг"):
     if not selected_sections:
@@ -97,11 +105,16 @@ if st.button("🚀 Начать парсинг"):
             df = parse_section(sec, sections[sec])
             full_data = pd.concat([full_data, df], ignore_index=True)
 
-        st.success("✅ Готово! Ниже — результат:")
+        st.success("✅ Парсинг завершён! Ниже — результат:")
         st.dataframe(full_data)
 
-        # Скачать Excel
+        # Сохраняем в Excel
         excel_file = "tinko_parsed_data.xlsx"
         full_data.to_excel(excel_file, index=False)
         with open(excel_file, "rb") as f:
-            st.download_button("📥 Скачать Excel", data=f, file_name=excel_file, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button(
+                "📥 Скачать Excel",
+                data=f,
+                file_name=excel_file,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
